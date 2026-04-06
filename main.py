@@ -5,7 +5,6 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
-df_raw = pd.read_csv("feb.csv", delimiter=";")
 
 class TempDataset(Dataset):
     def __init__(self, x, y=None):
@@ -70,10 +69,10 @@ def lag_features(train_df, test_df):
 
     for window in windows:
         train[f'rolling_mean_{window}'] = train['Temperature'].transform(
-            lambda x: x.rolling(window, mean_periods=1).mean().shift(1)
+            lambda x: x.rolling(window, min_periods=1).mean().shift(1)
         )
         train[f'rolling_std_{window}'] = train['Temperature'].transform(
-            lambda x: x.rolling(window, mean_periods=1).std().shift(1)
+            lambda x: x.rolling(window, min_periods=1).std().shift(1)
         )
 
     train['temp_diff'] = train['Temperature'].diff(1)
@@ -88,10 +87,10 @@ def lag_features(train_df, test_df):
 
     for window in windows:
         combined[f'rolling_mean_{window}'] = combined['Temperature'].transform(
-            lambda x: x.rolling(window, mean_periods=1).mean().shift(1)
+            lambda x: x.rolling(window, min_periods=1).mean().shift(1)
         )
         combined[f'rolling_std_{window}'] = combined['Temperature'].transform(
-            lambda x: x.rolling(window, mean_periods=1).std().shift(1)
+            lambda x: x.rolling(window, min_periods=1).std().shift(1)
         )
 
     combined['temp_diff'] = combined['Temperature'].diff(1)
@@ -150,16 +149,7 @@ def prep_dataloaders(train_df, test_df, seq_len=4, batch_size=32):
 
     print(f"Train: {x_train_seq.shape}, Test: {x_test_seq.shape}")
 
-    return train_loader, test_loader, scaler_y, test_ft.iloc[seq_len:].reset_index(drop=True)[['Date']]
-
-
-df = create_dataframe(df_raw)
-train_df = df.iloc[:20]
-test_df = df.iloc[20:]
-
-train_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
-    train_df, test_df
-)
+    return train_loader, test_loader, scaler_y, test_ft.iloc[seq_len:].reset_index(drop=True)[['Datetime']]
 
 
 class TempLSTM(nn.Module):
@@ -195,11 +185,6 @@ class TempLSTM(nn.Module):
 
         return x
 
-
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-n_epochs = 20
-lr = 5e-2
-
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0
@@ -220,23 +205,39 @@ def predict(model, loader, device):
             preds.append(model(x_batch.to(device)).cpu().numpy())
     return np.concatenate(preds)
 
-sample_batch = next(iter(train_loader))[0]
-input_dim = sample_batch.shape[2]
 
-model = TempLSTM(
-    input_dim=input_dim,
-    hidden_dim=64,
-    num_layers=2,
-    dropout=0.3
-).to(device)
+if __name__ == "__main__":
+    df_raw = pd.read_csv("feb.csv", delimiter=";")
 
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    df = create_dataframe(df_raw)
+    train_df = df.iloc[:20]
+    test_df = df.iloc[20:]
 
-print("\nStarting learning")
-for epoch in range(n_epochs):
-    loss = train_epoch(model, train_loader, criterion, optimizer, device)
-    print(f"Epoch {epoch+1} | Loss: {loss:.4f}")
+    train_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
+        train_df, test_df
+    )
 
-print("\nFinished learning")
-predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    n_epochs = 50
+    lr = 1e-3
+
+    sample_batch = next(iter(train_loader))[0]
+    input_dim = sample_batch.shape[2]
+
+    model = TempLSTM(
+        input_dim=input_dim,
+        hidden_dim=64,
+        num_layers=2,
+        dropout=0.3
+    ).to(device)
+
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    print("\nStarting learning")
+    for epoch in range(n_epochs):
+        loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        print(f"Epoch {epoch+1} | Loss: {loss:.4f}")
+
+    print("\nFinished learning")
+    predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
