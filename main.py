@@ -1,8 +1,10 @@
+import datetime
+
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.preprocessing import StandardScaler
 
 
@@ -197,6 +199,17 @@ def train_epoch(model, loader, criterion, optimizer, device):
         total_loss += loss.item()
     return total_loss / len(loader)
 
+
+def validation(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for x_batch, y_batch in loader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+            loss = criterion(model(x_batch), y_batch)
+            total_loss += loss.item()
+    return total_loss / len(loader)
+
 def predict(model, loader, device):
     model.eval()
     preds = []
@@ -216,6 +229,13 @@ if __name__ == "__main__":
     train_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
         train_df, test_df
     )
+    ds = train_loader.dataset
+    train_size = int(0.8 * len(ds))
+    val_size = len(ds) - train_size
+    train_ds, val_ds = random_split(ds, [train_size, val_size])
+
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     n_epochs = 50
@@ -235,9 +255,21 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     print("\nStarting learning")
+    best_val_loss = float("inf")
     for epoch in range(n_epochs):
-        loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        print(f"Epoch {epoch+1} | Loss: {loss:.4f}")
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss = validation(model, val_loader, criterion, device)
+        print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f}")
+
+    # Saving best model (doesn't work)
+    #     if val_loss < best_val_loss:
+    #         best_val_loss = val_loss
+    #         best_model = model.state_dict().copy()
+    #         print("Best model!")
+    #
+    # filename = f"models/model_{best_val_loss:.4f}_{datetime.datetime.now().strftime("%d-%m-%Y_%H:%M:%S")}.pth"
+    # print(filename)
+    # torch.save(best_model, filename)
 
     print("\nFinished learning")
     predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
