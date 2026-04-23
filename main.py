@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.preprocessing import StandardScaler
 
+pd.set_option("display.max_columns", None)
 
 class TempDataset(Dataset):
     def __init__(self, x, y=None):
@@ -50,11 +51,11 @@ def create_dataframe(df_raw):
 
 def create_features(df):
     data = df.copy().loc[::-1]
-    data["Day"] = data["Datetime"].dt.dayofyear
-    data["Hour"] = data["Datetime"].dt.hour
 
+    data["Day"] = pd.to_datetime(data["Datetime"]).dt.dayofyear
+    data["Hour"] = pd.to_datetime(data["Datetime"]).dt.hour
     data["Hour_sin"] = np.sin(2 * np.pi * data["Hour"] / 24.0)
-    data["Hour_cos"] = np.sin(2 * np.pi * data["Hour"] / 24.0)
+    data["Hour_cos"] = np.cos(2 * np.pi * data["Hour"] / 24.0)
 
     return data
 
@@ -155,13 +156,13 @@ def prep_dataloaders(train_df, test_df, seq_len=4, batch_size=32):
 
 
 class TempLSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, num_layers=2, dropout=0.3):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=3, dropout=0.3):
         super(TempLSTM, self).__init__()
 
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
-        self.lstm = nn.LSTM(
+        self.lstm1 = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
@@ -170,21 +171,32 @@ class TempLSTM(nn.Module):
             bidirectional=True
         )
 
+        self.lstm2 = nn.LSTM(
+            input_size=hidden_dim * 2,
+            hidden_size=hidden_dim * 2,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=False
+        )
+
         self.dropout = nn.Dropout(dropout)
+        self.tanh = nn.Tanh()
         self.fc1 = nn.Linear(hidden_dim * 2, hidden_dim)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        lstm_out, (hidden, cell) = self.lstm(x)
+        lstm_out, (hidden, cell) = self.lstm1(x)
         last_hidden = lstm_out[:, -1, :]
 
         x = self.dropout(last_hidden)
+        x = self.tanh(x)
+        x, (hidden, cell) = self.lstm2(x)
         x = self.fc1(x)
-        x = self.relu(x)
         x = self.dropout(x)
+        x = self.relu(x)
         x = self.fc2(x)
-
         return x
 
 def train_epoch(model, loader, criterion, optimizer, device):
@@ -220,11 +232,13 @@ def predict(model, loader, device):
 
 
 if __name__ == "__main__":
-    df_raw = pd.read_csv("feb.csv", delimiter=";")
-
-    df = create_dataframe(df_raw)
-    train_df = df.iloc[:20]
-    test_df = df.iloc[20:]
+    # df_raw = pd.read_csv("feb.csv", delimiter=";")
+    #
+    # df = create_dataframe(df_raw)
+    # df.to_csv("df1.csv", sep=";")
+    df = pd.read_csv("df1.csv", delimiter=";")
+    train_df = df.iloc[:200]
+    test_df = df.iloc[200:]
 
     train_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
         train_df, test_df
@@ -238,7 +252,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    n_epochs = 50
+    n_epochs = 100
     lr = 1e-3
 
     sample_batch = next(iter(train_loader))[0]
@@ -247,7 +261,7 @@ if __name__ == "__main__":
     model = TempLSTM(
         input_dim=input_dim,
         hidden_dim=64,
-        num_layers=2,
+        num_layers=3,
         dropout=0.3
     ).to(device)
 
@@ -261,15 +275,18 @@ if __name__ == "__main__":
         val_loss = validation(model, val_loader, criterion, device)
         print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f}")
 
-    # Saving best model (doesn't work)
-    #     if val_loss < best_val_loss:
-    #         best_val_loss = val_loss
-    #         best_model = model.state_dict().copy()
-    #         print("Best model!")
-    #
-    # filename = f"models/model_{best_val_loss:.4f}_{datetime.datetime.now().strftime("%d-%m-%Y_%H:%M:%S")}.pth"
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model = model.state_dict().copy()
+            print("Best model!")
+
+    # filename = f"models/model_{int(best_val_loss*1e3)}_{datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.pth"
     # print(filename)
     # torch.save(best_model, filename)
 
-    print("\nFinished learning")
+    print(f"\nFinished learning\nBest validation loss: {best_val_loss: .4f}")
     predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
+    preds = pd.DataFrame()
+#    preds["real_value"] = test_df.loc["Temperature"]
+#    preds["pred_value"] = predictions.reshape(20)
+    print(test_df["Temperature"], predictions)
