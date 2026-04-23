@@ -110,7 +110,7 @@ def lag_features(train_df, test_df):
     return train_mod, test_mod
 
 
-def prep_dataloaders(train_df, test_df, seq_len=4, batch_size=32):
+def prep_dataloaders(train_df, test_df, seq_len=4, train_ratio=0.8, batch_size=32):
     train_ft = create_features(train_df)
     test_ft = create_features(test_df)
 
@@ -127,10 +127,16 @@ def prep_dataloaders(train_df, test_df, seq_len=4, batch_size=32):
 
     feature_cols = [col for col in feature_cols if col in train_ft.columns]
 
+    train_size = int(len(train_ft) * train_ratio)
     scaler_x = StandardScaler()
     scaler_y = StandardScaler()
-    x_train = scaler_x.fit_transform(train_ft[feature_cols])
-    y_train = scaler_y.fit_transform(train_ft[["Temperature"]])
+
+    x_train_raw = scaler_x.fit_transform(train_ft[feature_cols].iloc[:train_size])
+    y_train_raw = scaler_y.fit_transform(train_ft[["Temperature"]].iloc[:train_size])
+
+    x_val_raw = scaler_x.transform(train_ft[feature_cols].iloc[train_size:])
+    y_val_raw = scaler_y.transform(train_ft[["Temperature"]].iloc[train_size:])
+
     x_test = scaler_x.transform(test_ft[feature_cols])
 
     def create_sequences(x, y=None, seq_length=4):
@@ -141,18 +147,21 @@ def prep_dataloaders(train_df, test_df, seq_len=4, batch_size=32):
                 y_seq.append(y[i+seq_length])
         return np.array(x_seq), np.array(y_seq) if y is not None else None
 
-    x_train_seq, y_train_seq = create_sequences(x_train, y_train, seq_len)
+    x_train_seq, y_train_seq = create_sequences(x_train_raw, y_train_raw, seq_len)
+    x_val_seq, y_val_seq = create_sequences(x_val_raw, y_val_raw, seq_len)
     x_test_seq, _ = create_sequences(x_test, None, seq_len)
 
     train_dataset = TempDataset(x_train_seq, y_train_seq)
+    val_dataset = TempDataset(x_val_seq, y_val_seq)
     test_dataset = TempDataset(x_test_seq, None)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    print(f"Train: {x_train_seq.shape}, Test: {x_test_seq.shape}")
+    print(f"Train: {x_train_seq.shape}, Val: {x_val_seq.shape}, Test: {x_test_seq.shape}")
 
-    return train_loader, test_loader, scaler_y, test_ft.iloc[seq_len:].reset_index(drop=True)[['Datetime']]
+    return train_loader, val_loader, test_loader, scaler_y, test_ft.iloc[seq_len:].reset_index(drop=True)[['Datetime']]
 
 
 class TempLSTM(nn.Module):
@@ -240,16 +249,24 @@ if __name__ == "__main__":
     train_df = df.iloc[:200]
     test_df = df.iloc[200:]
 
-    train_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
+    train_loader, val_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
         train_df, test_df
     )
-    ds = train_loader.dataset
-    train_size = int(0.8 * len(ds))
-    val_size = len(ds) - train_size
-    train_ds, val_ds = random_split(ds, [train_size, val_size])
 
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
+    # ds = train_loader.dataset
+    # train_ratio = 0.8
+    # train_size = int(train_ratio * len(ds))
+    # val_size = len(ds) - train_size
+    #
+    # train_indices = list(range(train_size))
+    # val_indices = list(range(train_size, len(ds)))
+    #
+    # train_ds = torch.utils.data.Subset(ds, train_indices)
+    # val_ds = torch.utils.data.Subset(ds, val_indices)
+    # # train_ds, val_ds = random_split(ds, [train_size, val_size])
+    #
+    # train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    # val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     n_epochs = 100
