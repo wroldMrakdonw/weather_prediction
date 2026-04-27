@@ -1,11 +1,13 @@
 import datetime
 
+from copy import deepcopy
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import matplotlib.pyplot as plt
 
 pd.set_option("display.max_columns", None)
 
@@ -128,8 +130,8 @@ def prep_dataloaders(train_df, test_df, seq_len=4, train_ratio=0.8, batch_size=3
     feature_cols = [col for col in feature_cols if col in train_ft.columns]
 
     train_size = int(len(train_ft) * train_ratio)
-    scaler_x = StandardScaler()
-    scaler_y = StandardScaler()
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
 
     x_train_raw = scaler_x.fit_transform(train_ft[feature_cols].iloc[:train_size])
     y_train_raw = scaler_y.fit_transform(train_ft[["Temperature"]].iloc[:train_size])
@@ -206,16 +208,18 @@ class TempLSTM(nn.Module):
         x = self.dropout(x)
         x = self.relu(x)
         x = self.fc2(x)
+
         return x
 
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
     for x_batch, y_batch in loader:
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
         optimizer.zero_grad()
         loss = criterion(model(x_batch), y_batch)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(loader)
@@ -223,7 +227,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
 
 def validation(model, loader, criterion, device):
     model.eval()
-    total_loss = 0
+    total_loss = 0.0
     with torch.no_grad():
         for x_batch, y_batch in loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
@@ -241,16 +245,24 @@ def predict(model, loader, device):
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    n_epochs = 200
+    lr = 1e-3
+    batch_size = 8
+    num_layers = 1
+    hidden_dim = 16
+    patience = 100
+
     # df_raw = pd.read_csv("feb.csv", delimiter=";")
     #
     # df = create_dataframe(df_raw)
     # df.to_csv("df1.csv", sep=";")
     df = pd.read_csv("df1.csv", delimiter=";")
-    train_df = df.iloc[:200]
-    test_df = df.iloc[200:]
+    train_df = df.iloc[:200].copy()
+    test_df = df.iloc[200:].copy()
 
     train_loader, val_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
-        train_df, test_df
+        train_df, test_df, batch_size=batch_size
     )
 
     # ds = train_loader.dataset
@@ -268,42 +280,67 @@ if __name__ == "__main__":
     # train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
     # val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    n_epochs = 100
-    lr = 1e-3
 
     sample_batch = next(iter(train_loader))[0]
     input_dim = sample_batch.shape[2]
 
     model = TempLSTM(
         input_dim=input_dim,
-        hidden_dim=64,
-        num_layers=3,
-        dropout=0.3
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=0.1
     ).to(device)
 
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10)
 
     print("\nStarting learning")
     best_val_loss = float("inf")
+    epochs_no_improve = 0
+    losses = []
+
     for epoch in range(n_epochs):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss = validation(model, val_loader, criterion, device)
-        print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f}")
+        losses.append(val_loss)
+        scheduler.step(val_loss)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model = model.state_dict().copy()
-            print("Best model!")
+            epochs_no_improve = 0
+            best_model_state = deepcopy(model.state_dict())
+        else:
+            epochs_no_improve += 1
 
+        print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f} | Patience: {patience-epochs_no_improve}")
+
+        if epochs_no_improve >= patience:
+            print(f"\nРанняя остановка на эпохе {epoch+1}.")
+            break
     # filename = f"models/model_{int(best_val_loss*1e3)}_{datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.pth"
     # print(filename)
     # torch.save(best_model, filename)
 
     print(f"\nFinished learning\nBest validation loss: {best_val_loss: .4f}")
+    model.load_state_dict(best_model_state)
     predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
-    preds = pd.DataFrame()
 #    preds["real_value"] = test_df.loc["Temperature"]
 #    preds["pred_value"] = predictions.reshape(20)
-    print(test_df["Temperature"], predictions)
+    #print(test_df, predictions)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(list(test_df["Temperature"]), label="Реальная температура", color="blue", lw=2)
+    plt.plot(predictions, label="Прогноз", color="red", ls="--", lw=2)
+    plt.title("Temperature forecast")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(losses, color="red", lw=2)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.tight_layout()
+    plt.show()
