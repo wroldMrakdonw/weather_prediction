@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import root_mean_squared_error, roc_auc_score, r2_score
 import matplotlib.pyplot as plt
 
 pd.set_option("display.max_columns", None)
@@ -313,6 +314,7 @@ def main(load_model=None, *, save_model=True):
         print(f"\nFinished learning\nBest validation loss: {best_val_loss: .4f}")
         model.load_state_dict(best_model_state)
 
+        # График ошибки
         plt.figure(figsize=(10, 5))
         plt.plot(losses, color="red", lw=2)
         plt.xlabel("Epoch")
@@ -323,9 +325,19 @@ def main(load_model=None, *, save_model=True):
         state_dict = torch.load(load_model)
         model.load_state_dict(state_dict)
 
+    real_values = list(test_df["Temperature"])[:-4]
     predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
+
+    # Метрики
+    rmse = root_mean_squared_error(real_values, predictions)
+    # roc_auc = roc_auc_score(real_values, list(predictions))
+    r2 = r2_score(real_values, predictions)
+
+    print(f"RMSE: {rmse: .3f} | ROC-AUC Score: no | R2 Score: {r2: .3f}")
+
+    # График предсказаний
     plt.figure(figsize=(10, 5))
-    plt.plot(list(test_df["Temperature"])[:-4], label="Реальная температура", color="blue", lw=2)
+    plt.plot(real_values, label="Реальная температура", color="blue", lw=2)
     plt.plot(predictions, label="Прогноз", color="red", ls="--", lw=2)
     plt.title("Temperature forecast")
     plt.legend()
