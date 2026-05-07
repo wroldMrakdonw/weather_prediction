@@ -66,8 +66,8 @@ def lag_features(train_df, test_df):
     train = train_df.copy()
     test = test_df.copy()
 
-    lags = [1, 4]
-    windows = [4]
+    lags = [1, 7]
+    windows = [7]
 
     for lag in lags:
         train[f'temp_lag_{lag}'] = train['Temperature'].shift(lag)
@@ -120,9 +120,9 @@ def prep_dataloaders(train_df, test_df, seq_len=4, train_ratio=0.8, batch_size=3
 
     feature_cols = [
         "Hour_sin", "Hour_cos",
-        "temp_lag_1", "temp_lag_4",
-        "rolling_mean_4",
-        "rolling_std_4",
+        "temp_lag_1", "temp_lag_7",
+        "rolling_mean_7",
+        "rolling_std_7",
         "temp_diff", "Day", "Hour", "Air Pressure",
         "Wind speed", "Precipitation", "Cloudiness", "Humidity"
     ]
@@ -244,42 +244,27 @@ def predict(model, loader, device):
     return np.concatenate(preds)
 
 
-if __name__ == "__main__":
+def main(load_model=None, *, save_model=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     n_epochs = 200
     lr = 1e-3
     batch_size = 8
     num_layers = 1
     hidden_dim = 16
-    patience = 100
+    patience = 40
 
+    # Creating DataFrame from raw data
     # df_raw = pd.read_csv("feb.csv", delimiter=";")
-    #
     # df = create_dataframe(df_raw)
     # df.to_csv("df1.csv", sep=";")
+
     df = pd.read_csv("df1.csv", delimiter=";")
     train_df = df.iloc[:200].copy()
-    test_df = df.iloc[200:].copy()
+    test_df = df.iloc[:].copy()
 
     train_loader, val_loader, test_loader, scaler_y, test_metadata = prep_dataloaders(
         train_df, test_df, batch_size=batch_size
     )
-
-    # ds = train_loader.dataset
-    # train_ratio = 0.8
-    # train_size = int(train_ratio * len(ds))
-    # val_size = len(ds) - train_size
-    #
-    # train_indices = list(range(train_size))
-    # val_indices = list(range(train_size, len(ds)))
-    #
-    # train_ds = torch.utils.data.Subset(ds, train_indices)
-    # val_ds = torch.utils.data.Subset(ds, val_indices)
-    # # train_ds, val_ds = random_split(ds, [train_size, val_size])
-    #
-    # train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-    # val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
-
 
     sample_batch = next(iter(train_loader))[0]
     input_dim = sample_batch.shape[2]
@@ -291,46 +276,56 @@ if __name__ == "__main__":
         dropout=0.1
     ).to(device)
 
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10)
+    if load_model is None:
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10)
 
-    print("\nStarting learning")
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-    losses = []
+        print("\nStarting learning")
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
+        losses = []
 
-    for epoch in range(n_epochs):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss = validation(model, val_loader, criterion, device)
-        losses.append(val_loss)
-        scheduler.step(val_loss)
+        for epoch in range(n_epochs):
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+            val_loss = validation(model, val_loader, criterion, device)
+            losses.append(val_loss)
+            scheduler.step(val_loss)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_no_improve = 0
-            best_model_state = deepcopy(model.state_dict())
-        else:
-            epochs_no_improve += 1
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                best_model_state = deepcopy(model.state_dict())
+            else:
+                epochs_no_improve += 1
 
-        print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f} | Patience: {patience-epochs_no_improve}")
+            print(f"Epoch {epoch+1} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f} | Patience: {patience-epochs_no_improve}")
 
-        if epochs_no_improve >= patience:
-            print(f"\nРанняя остановка на эпохе {epoch+1}.")
-            break
-    # filename = f"models/model_{int(best_val_loss*1e3)}_{datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.pth"
-    # print(filename)
-    # torch.save(best_model, filename)
+            if epochs_no_improve >= patience:
+                print(f"\nРанняя остановка на эпохе {epoch+1}.")
+                break
 
-    print(f"\nFinished learning\nBest validation loss: {best_val_loss: .4f}")
-    model.load_state_dict(best_model_state)
+        if save_model:
+            filename = f"models/model_{int(best_val_loss*1e4)}_{datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.pth"
+            print(filename)
+            torch.save(best_model_state, filename)
+
+        print(f"\nFinished learning\nBest validation loss: {best_val_loss: .4f}")
+        model.load_state_dict(best_model_state)
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(losses, color="red", lw=2)
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.tight_layout()
+
+    else:
+        state_dict = torch.load(load_model)
+        model.load_state_dict(state_dict)
+
     predictions = scaler_y.inverse_transform(predict(model, test_loader, device))
-#    preds["real_value"] = test_df.loc["Temperature"]
-#    preds["pred_value"] = predictions.reshape(20)
-    #print(test_df, predictions)
-
     plt.figure(figsize=(10, 5))
-    plt.plot(list(test_df["Temperature"]), label="Реальная температура", color="blue", lw=2)
+    plt.plot(list(test_df["Temperature"])[:-4], label="Реальная температура", color="blue", lw=2)
     plt.plot(predictions, label="Прогноз", color="red", ls="--", lw=2)
     plt.title("Temperature forecast")
     plt.legend()
@@ -338,9 +333,6 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.show()
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(losses, color="red", lw=2)
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.tight_layout()
-    plt.show()
+
+if __name__ == "__main__":
+    main()
